@@ -1,0 +1,17 @@
+{
+  "name": "basic-http-server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "echoServer.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/node": "^24.0.14",
+    "typescript": "^5.8.3"
+  }
+}
