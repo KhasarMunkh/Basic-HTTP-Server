@@ -1,8 +1,9 @@
 import { TcpConn } from "./tcpconn";
-import { DynBuf } from "./dynbuf";
+import { DynBuf, bufPop, bufPush } from "./dynbuf";
+import { soRead } from "./tcpconn";
 
 // A parsed HTTP request header
-export type HTTP_Req = {
+export type HTTP_Request = {
   method: string; // e.g., 'GET', 'POST'
   uri: Buffer; // e.g., '/index.html'
   version: string; // e.g., 'HTTP/1.1'
@@ -12,7 +13,7 @@ export type HTTP_Req = {
 // there is no guarantee that URI and header fields will be ASCII or UTF-8 strings
 // so we use Buffer for them, and leave them as bytes until we need to decode them
 
-export type httpRes = {
+export type HTTP_Response = {
   code: number,
   headers: Buffer[],
   body: BodyReader,
@@ -20,11 +21,18 @@ export type httpRes = {
 
 // an interface for reading/writing data from/to the HTTP body.
 export type BodyReader = {
-  contentLength: number, // total length of the body, -1 if unknown
+  length: number, // total length of the body, -1 if unknown
   read: () => Promise<Buffer | null>, // read a chunk of data, return null if EOF
 };
 
-function readerFromReq(conn: TcpConn, buf: DynBuf, req: HTTP_Req) {
+export function encodeHTTPResponse(resp: HTTP_Response): Buffer {
+  const statusLine = `HTTP/1.1 ${resp.code} \r\n`;
+  const headers =  resp.headers.map(buf => buf.toString());
+  const fullHeader = statusLine + headers.join('\r\n') + '\r\n\r\n';
+  return Buffer.from(fullHeader);
+}
+
+export function readerFromReq(conn: TcpConn, buf: DynBuf, req: HTTP_Request) {
   let bodyLen = -1; // unknown length by default
   const contentLength = fieldGet(req.headers, 'Content-Length');
 
@@ -35,7 +43,7 @@ function readerFromReq(conn: TcpConn, buf: DynBuf, req: HTTP_Req) {
     }
   }
 
-  const bodyAllowed = fieldGet(req.method === 'GET' || req.method === 'HEAD');
+  const bodyAllowed = !(req.method === 'GET' || req.method === 'HEAD');
   const chunked = fieldGet(req.headers, 'Transfer-Encoding')?.toString('ascii') === 'chunked';
   if (!bodyAllowed && (bodyLen > 0 || chunked)) {
     throw new HTTPError(400, 'body not allowed for ${req.method} method');
@@ -55,7 +63,47 @@ function readerFromReq(conn: TcpConn, buf: DynBuf, req: HTTP_Req) {
 
 }
 
-export function parseHTTPReq(buf: Buffer): HTTP_Req {
+// BodyReader for reading from a connection with a known length
+function readerFromConnLength(conn: TcpConn, buf: DynBuf, remainingLength: number): BodyReader {
+  return {
+
+    length: remainingLength,
+    read: async (): Promise<Buffer> => {
+      if (remainingLength === 0) {
+        return Buffer.from(''); // EOF
+      }
+      if (buf.length === 0) {
+        const data = await soRead(conn);
+        if (data.length === 0) {
+          throw new HTTPError(400, 'unexpected EOF while reading body');
+        }
+        bufPush(buf, data);
+      }
+      // consume data from the buffer, up to the remaining length
+      const consume = Math.min(remainingLength, buf.length);  // number of bytes to consume
+      const data = buf.data.subarray(buf.headPtr, consume);
+      remainingLength -= consume;
+      bufPop(buf, consume); // remove consumed data from the buffer
+      return data;
+    }
+  };
+}
+
+export function fieldGet(headers: Buffer[], key: string): Buffer | null {
+  const targetKey = key.toLowerCase();
+  for (const header of headers) {
+    const colonIndex = header.indexOf(0x3A); // ':'
+    if (colonIndex < 0) {
+      continue; // invalid header, skip it
+    }
+    const headerKey = header.subarray(0, colonIndex).toString().trim().toLowerCase();
+    if (headerKey === targetKey) {
+      return header.subarray(colonIndex + 1);
+    }
+  }
+  return null;
+}
+export function parseHTTPReq(buf: Buffer): HTTP_Request {
   const lines: Buffer[] = splitLines(buf);
   const [method, uri, version] = parseRequestLine(lines[0]);
   const headers: Buffer[] = [];
